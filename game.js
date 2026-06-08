@@ -1,0 +1,340 @@
+// ===================== НАСТРОЙКИ =====================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const nextWaveBtn = document.getElementById('nextWaveBtn');
+
+let money = 250;
+let lives = 20;
+let wave = 1;
+let purchaseMultiplier = 1;
+
+let baseBuyPrice = 100;
+let baseUpPrice = 80;
+let baseAllPrice = 150;
+
+let turrets = [];
+let enemies = [];
+let projectiles = [];
+
+const path = [{x:0,y:240},{x:150,y:240},{x:150,y:100},{x:350,y:100},{x:350,y:370},{x:550,y:370},{x:550,y:170},{x:750,y:170}];
+
+const TARGET_FPS = 30;
+const FRAME_TIME = 1000 / TARGET_FPS;
+let lastFrameTime = 0;
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playSound(freq, duration, type = 'sine', volume = 0.3) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type; osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.value = volume;
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+// ===================== СОХРАНЕНИЯ =====================
+function saveGame(slot = 1) {
+    const saveData = {
+        money, lives, wave, purchaseMultiplier,
+        baseBuyPrice, baseUpPrice, baseAllPrice,
+        turrets,
+        timestamp: Date.now()
+    };
+    localStorage.setItem(`td_save_${slot}`, JSON.stringify(saveData));
+}
+
+function loadGame(slot = 1) {
+    const data = localStorage.getItem(`td_save_${slot}`);
+    if (!data) return false;
+    
+    const save = JSON.parse(data);
+    money = save.money || 250;
+    lives = save.lives || 20;
+    wave = save.wave || 1;
+    purchaseMultiplier = save.purchaseMultiplier || 1;
+    baseBuyPrice = save.baseBuyPrice || 100;
+    baseUpPrice = save.baseUpPrice || 80;
+    baseAllPrice = save.baseAllPrice || 150;
+    turrets = save.turrets || [];
+    return true;
+}
+
+function startNewGame() {
+    if (confirm("Начать новую игру? Текущий прогресс будет потерян.")) {
+        money = 250; lives = 20; wave = 1; purchaseMultiplier = 1;
+        baseBuyPrice = 100; baseUpPrice = 80; baseAllPrice = 150;
+        turrets = [];
+        enemies = []; projectiles = [];
+        document.getElementById('startMenu').style.display = 'none';
+        updatePrices();
+        saveGame(1);
+    }
+}
+
+function continueGame() {
+    if (loadGame(1)) {
+        document.getElementById('startMenu').style.display = 'none';
+        updatePrices();
+    } else {
+        alert("Нет сохранений в слоте 1. Начинаем новую игру.");
+        startNewGame();
+    }
+}
+
+function showSaveMenu() {
+    let html = `<h2>Сохранения</h2>`;
+    for (let i = 1; i <= 3; i++) {
+        const data = localStorage.getItem(`td_save_${i}`);
+        const time = data ? new Date(JSON.parse(data).timestamp).toLocaleString('ru-RU') : "Пусто";
+        html += `<button class="slot" onclick="loadSlot(${i});">Слот ${i} — ${time}</button><br>`;
+    }
+    html += `<button onclick="document.getElementById('startMenu').innerHTML = originalMenu;">Назад</button>`;
+    const originalMenu = document.getElementById('startMenu').innerHTML;
+    document.getElementById('startMenu').innerHTML = html;
+}
+
+function loadSlot(slot) {
+    if (loadGame(slot)) {
+        document.getElementById('startMenu').style.display = 'none';
+        updatePrices();
+    } else {
+        alert(`Слот ${slot} пуст.`);
+    }
+}
+
+// ===================== ЦЕНЫ =====================
+function updatePrices() {
+    document.getElementById('buyPrice').textContent = baseBuyPrice;
+    document.getElementById('upPrice').textContent = baseUpPrice;
+    document.getElementById('allPrice').textContent = baseAllPrice;
+}
+
+// ===================== ИГРОВАЯ ЛОГИКА =====================
+function isOnPath(x, y, threshold = 35) {
+    for (let i = 0; i < path.length - 1; i++) {
+        const a = path[i], b = path[i+1];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len2 = dx*dx + dy*dy;
+        if (len2 === 0) continue;
+        let t = ((x - a.x)*dx + (y - a.y)*dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        const projX = a.x + t*dx, projY = a.y + t*dy;
+        if (Math.hypot(x-projX, y-projY) < threshold) return true;
+    }
+    return false;
+}
+
+function spawnEnemy(type, isBoss = false) {
+    const isFast = type === 'fast';
+    const hpMult = 1 + (wave - 1) * 0.18;
+    const speedMult = 1 + (wave - 1) * 0.09;
+    const baseHp = isFast ? 70 : 135;
+    const speed = (isBoss ? 1.4 : (isFast ? 3.2 : 1.6)) * speedMult;
+    enemies.push({
+        x: path[0].x, y: path[0].y,
+        hp: Math.floor((isBoss ? baseHp * 5.5 : baseHp) * hpMult),
+        maxHp: Math.floor((isBoss ? baseHp * 5.5 : baseHp) * hpMult),
+        speed: speed,
+        damage: isBoss ? 4 : (isFast ? 1 : 2),
+        progress: 0,
+        emoji: isBoss ? '💀' : (isFast ? '🧟' : '🧌'),
+        isBoss: isBoss
+    });
+}
+
+function updateNextWaveButton() {
+    nextWaveBtn.disabled = enemies.length > 0;
+}
+
+function updateUI() {
+    document.getElementById('wave').textContent = wave;
+    document.getElementById('money').textContent = money;
+    document.getElementById('lives').textContent = lives;
+    document.getElementById('multi').textContent = purchaseMultiplier;
+}
+
+// ===================== ГЛАВНЫЙ ЦИКЛ =====================
+function gameLoop(timestamp) {
+    if (!timestamp) timestamp = Date.now();
+    if (timestamp - lastFrameTime < FRAME_TIME) {
+        requestAnimationFrame(gameLoop);
+        return;
+    }
+    lastFrameTime = timestamp;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const now = Date.now();
+
+    // Путь
+    ctx.strokeStyle = '#444'; ctx.lineWidth = 52; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
+    for (let p of path) ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+
+    // Турели
+    for (let i = turrets.length - 1; i >= 0; i--) {
+        let t = turrets[i];
+        
+        ctx.fillStyle = '#0f0';
+        ctx.fillRect(t.x-16, t.y-16, 32, 32);
+        ctx.fillStyle = '#ff0';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('🔫', t.x-10, t.y+7);
+
+        if (now - t.lastShot > t.fireRate) {
+            let target = null;
+            let best = t.range * t.range;
+            for (let e of enemies) {
+                const d = (e.x - t.x)**2 + (e.y - t.y)**2;
+                if (d < best) { best = d; target = e; }
+            }
+            if (target) {
+                projectiles.push({x: t.x, y: t.y, tx: target.x, ty: target.y, damage: t.damage, speed: 8.5});
+                t.lastShot = now;
+                playSound(800, 0.05, 'square', 0.2);
+            }
+        }
+    }
+
+    // Зомби
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        let e = enemies[i];
+        e.progress += e.speed * 0.55;
+        let idx = Math.floor(e.progress / 100);
+        let prog = (e.progress % 100) / 100;
+        if (idx >= path.length - 1) {
+            lives -= e.damage;
+            enemies.splice(i, 1);
+            continue;
+        }
+        const p1 = path[idx];
+        const p2 = path[idx + 1];
+        e.x = p1.x + (p2.x - p1.x) * prog;
+        e.y = p1.y + (p2.y - p1.y) * prog;
+        ctx.font = e.isBoss ? '48px sans-serif' : '38px sans-serif';
+        ctx.fillText(e.emoji, e.x - (e.isBoss ? 24 : 19), e.y + 16);
+        ctx.fillStyle = 'red';
+        ctx.fillRect(e.x - 22, e.y - 42, 44 * (e.hp / e.maxHp), 7);
+    }
+
+    // Снаряды
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+        let p = projectiles[i];
+        const dx = p.tx - p.x;
+        const dy = p.ty - p.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        p.x += (dx / dist) * p.speed;
+        p.y += (dy / dist) * p.speed;
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(p.x - 4, p.y - 4, 8, 8);
+        if (dist < 22) {
+            for (let j = enemies.length - 1; j >= 0; j--) {
+                let e = enemies[j];
+                if (Math.hypot(e.x - p.x, e.y - p.y) < 35) {
+                    e.hp -= p.damage;
+                    playSound(400, 0.08, 'triangle', 0.25);
+                    if (e.hp <= 0) {
+                        money += e.isBoss ? 180 : 30;
+                        enemies.splice(j, 1);
+                    }
+                    break;
+                }
+            }
+            projectiles.splice(i, 1);
+        }
+    }
+
+    updateNextWaveButton();
+    updateUI();
+
+    if (lives <= 0) {
+        alert("💀 ИГРА ОКОНЧЕНА 🍔");
+        return;
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+// ===================== КНОПКИ =====================
+function buyTurret() {
+    if (money >= baseBuyPrice) {
+        money -= baseBuyPrice;
+        const newX = 60 + Math.random() * 680;
+        const newY = 60 + Math.random() * 360;
+        for (let i = 0; i < purchaseMultiplier; i++) {
+            turrets.push({x: newX + (Math.random()*40-20), y: newY + (Math.random()*40-20),
+                range: 170, damage: 27, fireRate: 920, lastShot: 0, level: 1});
+        }
+    }
+}
+
+function upgradeTurret() {
+    if (money >= baseUpPrice && turrets.length > 0) {
+        money -= baseUpPrice;
+        const t = turrets[turrets.length - 1];
+        t.damage += 22;
+        t.fireRate = Math.max(320, t.fireRate - 160);
+        t.range += 20;
+        t.level = Math.min(10, t.level + 1);
+    }
+}
+
+function upgradeAll() {
+    if (money >= baseAllPrice) {
+        let maxLevel = 0;
+        for (let t of turrets) if (t.level > maxLevel) maxLevel = t.level;
+        if (maxLevel >= 10) {
+            alert("Максимальный уровень турелей (10) достигнут!");
+            return;
+        }
+        money -= baseAllPrice;
+        purchaseMultiplier += 1;
+
+        // Увеличиваем цены
+        baseBuyPrice = Math.floor(baseBuyPrice * 2);
+        baseUpPrice = Math.floor(baseUpPrice * 2);
+        baseAllPrice = Math.floor(baseAllPrice * 2);
+
+        for (let t of turrets) {
+            t.damage += 40;
+            t.fireRate = Math.max(280, t.fireRate - 40);
+            t.range += 25;
+            t.level = Math.min(10, t.level + 1);
+        }
+        updatePrices();
+    }
+}
+
+function nextWave() {
+    if (enemies.length > 0) return;
+    wave++;
+    
+    // НА 1-Й ВОЛНЕ РОВНО 3 ОБЫЧНЫХ ЗОМБИ
+    let count;
+    if (wave === 1) {
+        count = 3;
+    } else {
+        count = Math.max(2, Math.floor(2 + wave * 1.2));
+    }
+    
+    for (let i = 0; i < count; i++) {
+        const type = wave === 1 ? 'tank' : (Math.random() > 0.5 ? 'fast' : 'tank');
+        setTimeout(() => spawnEnemy(type), i * 320);
+    }
+    
+    if (wave === 3 || wave % 5 === 0) {
+        setTimeout(() => spawnEnemy('tank', true), 2200);
+    }
+}
+
+// Автосохранение
+setInterval(() => {
+    if (document.getElementById('startMenu').style.display === 'none') {
+        saveGame(1);
+    }
+}, 10000);
+
+// Старт
+updatePrices();
+requestAnimationFrame(gameLoop);
